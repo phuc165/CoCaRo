@@ -9,7 +9,6 @@ using System.Windows.Forms;
 
 namespace CaroClient
 {
-    // Common code shared between server and client
     public class Common
     {
         public const int BOARD_SIZE = 15;
@@ -39,6 +38,7 @@ namespace CaroClient
         private Thread listenThread;
         private Panel boardPanel;
         private Label statusLabel;
+        private Label roomLabel;
         private TextBox chatInput;
         private Button sendButton;
         private ListBox chatBox;
@@ -48,6 +48,7 @@ namespace CaroClient
         private Common.GameStatus gameStatus = Common.GameStatus.Waiting;
         private Common.CellState playerRole = Common.CellState.Empty;
         private bool isMyTurn = false;
+        private int roomId = -1;
 
         public CaroClient()
         {
@@ -92,10 +93,17 @@ namespace CaroClient
                 Size = new Size(500, 20)
             };
 
+            roomLabel = new Label
+            {
+                Text = "Room: None",
+                Location = new Point(20, 70),
+                Size = new Size(200, 20)
+            };
+
             // Game board
             boardPanel = new Panel
             {
-                Location = new Point(20, 80),
+                Location = new Point(20, 100),
                 Size = new Size(Common.BOARD_SIZE * Common.CELL_SIZE, Common.BOARD_SIZE * Common.CELL_SIZE),
                 BorderStyle = BorderStyle.FixedSingle
             };
@@ -105,14 +113,14 @@ namespace CaroClient
             // Chat controls
             chatBox = new ListBox
             {
-                Location = new Point(Common.BOARD_SIZE * Common.CELL_SIZE + 50, 80),
+                Location = new Point(Common.BOARD_SIZE * Common.CELL_SIZE + 50, 100),
                 Size = new Size(250, 400),
                 IntegralHeight = false
             };
 
             chatInput = new TextBox
             {
-                Location = new Point(Common.BOARD_SIZE * Common.CELL_SIZE + 50, 490),
+                Location = new Point(Common.BOARD_SIZE * Common.CELL_SIZE + 50, 510),
                 Size = new Size(170, 20)
             };
             chatInput.KeyPress += (s, e) => { if (e.KeyChar == (char)13) SendChatMessage(); };
@@ -120,22 +128,21 @@ namespace CaroClient
             sendButton = new Button
             {
                 Text = "Send",
-                Location = new Point(Common.BOARD_SIZE * Common.CELL_SIZE + 230, 489),
+                Location = new Point(Common.BOARD_SIZE * Common.CELL_SIZE + 230, 509),
                 Size = new Size(70, 23)
             };
             sendButton.Click += (s, e) => SendChatMessage();
 
-            // Add controls to form
             this.Controls.Add(serverLabel);
             this.Controls.Add(serverInput);
             this.Controls.Add(connectButton);
             this.Controls.Add(statusLabel);
+            this.Controls.Add(roomLabel);
             this.Controls.Add(boardPanel);
             this.Controls.Add(chatBox);
             this.Controls.Add(chatInput);
             this.Controls.Add(sendButton);
 
-            // Handle form closing
             this.FormClosing += (s, e) => DisconnectFromServer();
         }
 
@@ -165,10 +172,9 @@ namespace CaroClient
                 listenThread.IsBackground = true;
                 listenThread.Start();
 
-                statusLabel.Text = "Connected to server. Waiting for game to start...";
+                statusLabel.Text = "Connected to server. Waiting for room assignment...";
                 connectButton.Text = "Disconnect";
 
-                // Enable chat
                 chatInput.Enabled = true;
                 sendButton.Enabled = true;
             }
@@ -204,15 +210,15 @@ namespace CaroClient
                 gameStatus = Common.GameStatus.Waiting;
                 playerRole = Common.CellState.Empty;
                 isMyTurn = false;
+                roomId = -1;
 
                 statusLabel.Text = "Disconnected from server";
                 connectButton.Text = "Connect";
+                roomLabel.Text = "Room: None";
 
-                // Disable chat
                 chatInput.Enabled = false;
                 sendButton.Enabled = false;
 
-                // Reset board
                 InitializeBoard();
                 boardPanel.Invalidate();
             }
@@ -234,16 +240,13 @@ namespace CaroClient
 
                     if (command == "ROLE")
                     {
-                        if (data == "X")
-                        {
-                            playerRole = Common.CellState.X;
-                            UpdateStatus("You are playing as X. Waiting for another player...");
-                        }
-                        else
-                        {
-                            playerRole = Common.CellState.O;
-                            UpdateStatus("You are playing as O. Waiting for game to start...");
-                        }
+                        string[] parts = data.Split(',');
+                        string role = parts[0];
+                        roomId = int.Parse(parts[1]);
+
+                        playerRole = (role == "X") ? Common.CellState.X : Common.CellState.O;
+                        UpdateRoomLabel($"Room: {roomId}");
+                        UpdateStatus($"You are playing as {role} in Room {roomId}. Waiting for another player...");
                     }
                     else if (command == "START")
                     {
@@ -259,9 +262,6 @@ namespace CaroClient
                         int playerIndex = int.Parse(parts[2]);
 
                         board[row, col] = (playerIndex == 0) ? Common.CellState.X : Common.CellState.O;
-
-                        // If it was our move, now it's the opponent's turn
-                        // If it was the opponent's move, now it's our turn
                         isMyTurn = (playerIndex == 0 && playerRole == Common.CellState.O) ||
                                   (playerIndex == 1 && playerRole == Common.CellState.X);
 
@@ -296,20 +296,14 @@ namespace CaroClient
                         gameStatus = Common.GameStatus.Waiting;
                         UpdateStatus($"{data}. Waiting for reconnection...");
                     }
-                    else if (command == "REJECT")
-                    {
-                        UpdateStatus($"Connection rejected: {data}");
-                        DisconnectFromServer();
-                    }
                 }
             }
             catch (ThreadAbortException)
             {
-                // Thread was aborted, clean disconnection
+                // Thread was aborted
             }
             catch (Exception)
             {
-                // Connection lost
                 if (this.IsHandleCreated)
                 {
                     this.Invoke(new Action(() =>
@@ -328,17 +322,12 @@ namespace CaroClient
         {
             Graphics g = e.Graphics;
 
-            // Draw grid
             for (int i = 0; i <= Common.BOARD_SIZE; i++)
             {
-                // Draw horizontal lines
                 g.DrawLine(Pens.Black, 0, i * Common.CELL_SIZE, Common.BOARD_SIZE * Common.CELL_SIZE, i * Common.CELL_SIZE);
-
-                // Draw vertical lines
                 g.DrawLine(Pens.Black, i * Common.CELL_SIZE, 0, i * Common.CELL_SIZE, Common.BOARD_SIZE * Common.CELL_SIZE);
             }
 
-            // Draw X and O
             for (int row = 0; row < Common.BOARD_SIZE; row++)
             {
                 for (int col = 0; col < Common.BOARD_SIZE; col++)
@@ -369,7 +358,6 @@ namespace CaroClient
                 if (row >= 0 && row < Common.BOARD_SIZE && col >= 0 && col < Common.BOARD_SIZE &&
                     board[row, col] == Common.CellState.Empty)
                 {
-                    // Send move to server
                     SendMessage(Common.FormatMessage("MOVE", $"{row},{col}"));
                 }
             }
@@ -420,6 +408,18 @@ namespace CaroClient
             else
             {
                 statusLabel.Text = status;
+            }
+        }
+
+        private void UpdateRoomLabel(string text)
+        {
+            if (roomLabel.InvokeRequired)
+            {
+                roomLabel.Invoke(new Action<string>(UpdateRoomLabel), text);
+            }
+            else
+            {
+                roomLabel.Text = text;
             }
         }
 

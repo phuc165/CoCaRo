@@ -9,7 +9,6 @@ using System.Windows.Forms;
 
 namespace CaRoServer
 {
-    // Common code shared between server and client
     public class Common
     {
         public const int BOARD_SIZE = 15;
@@ -32,22 +31,43 @@ namespace CaRoServer
         }
     }
 
-    // Server Application
+    // Room class to manage a game between 2 players
+    public class Room
+    {
+        public List<TcpClient> Players { get; set; } = new List<TcpClient>();
+        public Common.CellState[,] Board { get; set; } = new Common.CellState[Common.BOARD_SIZE, Common.BOARD_SIZE];
+        public Common.GameStatus GameStatus { get; set; } = Common.GameStatus.Waiting;
+        public int CurrentPlayerIndex { get; set; } = 0;
+        public int RoomId { get; set; }
+
+        public Room(int id)
+        {
+            RoomId = id;
+            InitializeBoard();
+        }
+
+        public void InitializeBoard()
+        {
+            for (int i = 0; i < Common.BOARD_SIZE; i++)
+            {
+                for (int j = 0; j < Common.BOARD_SIZE; j++)
+                {
+                    Board[i, j] = Common.CellState.Empty;
+                }
+            }
+        }
+    }
+
     public class CaroServer : Form
     {
         private TcpListener server;
-        private List<TcpClient> clients = new List<TcpClient>();
-        private Common.CellState[,] board = new Common.CellState[Common.BOARD_SIZE, Common.BOARD_SIZE];
-        private Common.GameStatus gameStatus = Common.GameStatus.Waiting;
-        private int currentPlayerIndex = 0;
+        private List<Room> rooms = new List<Room>();
         private Button startButton;
         private Label statusLabel;
-        private int connectedClients = 0;
 
         public CaroServer()
         {
             InitializeComponents();
-            InitializeBoard();
         }
 
         private void InitializeComponents()
@@ -118,18 +138,15 @@ namespace CaRoServer
                 server.Stop();
                 server = null;
 
-                foreach (var client in clients)
+                foreach (var room in rooms)
                 {
-                    try
+                    foreach (var client in room.Players)
                     {
-                        client.Close();
+                        try { client.Close(); } catch { }
                     }
-                    catch { }
                 }
 
-                clients.Clear();
-                gameStatus = Common.GameStatus.Waiting;
-                connectedClients = 0;
+                rooms.Clear();
                 statusLabel.Text = "Server Status: Not Running";
             }
         }
@@ -141,39 +158,7 @@ namespace CaRoServer
                 while (true)
                 {
                     TcpClient client = server.AcceptTcpClient();
-
-                    if (connectedClients < 2)
-                    {
-                        clients.Add(client);
-                        connectedClients++;
-
-                        Thread clientThread = new Thread(() => HandleClient(client, connectedClients - 1));
-                        clientThread.IsBackground = true;
-                        clientThread.Start();
-
-                        UpdateStatus($"Client {connectedClients} connected. Waiting for {2 - connectedClients} more players.");
-
-                        // Assign player role (X or O)
-                        NetworkStream stream = client.GetStream();
-                        string role = (connectedClients == 1) ? "X" : "O";
-                        byte[] roleMsg = Encoding.ASCII.GetBytes(Common.FormatMessage("ROLE", role));
-                        stream.Write(roleMsg, 0, roleMsg.Length);
-
-                        if (connectedClients == 2)
-                        {
-                            gameStatus = Common.GameStatus.Playing;
-                            BroadcastMessage(Common.FormatMessage("START", ""));
-                            UpdateStatus("Game started. Player X's turn.");
-                        }
-                    }
-                    else
-                    {
-                        // Reject additional connections
-                        NetworkStream stream = client.GetStream();
-                        byte[] rejectMsg = Encoding.ASCII.GetBytes(Common.FormatMessage("REJECT", "Game full"));
-                        stream.Write(rejectMsg, 0, rejectMsg.Length);
-                        client.Close();
-                    }
+                    AssignClientToRoom(client);
                 }
             }
             catch (SocketException)
@@ -186,7 +171,49 @@ namespace CaRoServer
             }
         }
 
-        private void HandleClient(TcpClient client, int playerIndex)
+        private void AssignClientToRoom(TcpClient client)
+        {
+            Room availableRoom = null;
+
+            // Find an available room or create a new one
+            foreach (var room in rooms)
+            {
+                if (room.Players.Count < 2 && room.GameStatus == Common.GameStatus.Waiting)
+                {
+                    availableRoom = room;
+                    break;
+                }
+            }
+
+            if (availableRoom == null)
+            {
+                availableRoom = new Room(rooms.Count);
+                rooms.Add(availableRoom);
+            }
+
+            int playerIndex = availableRoom.Players.Count;
+            availableRoom.Players.Add(client);
+
+            UpdateStatus($"Player joined Room {availableRoom.RoomId}. Players: {availableRoom.Players.Count}/2");
+
+            Thread clientThread = new Thread(() => HandleClient(client, availableRoom, playerIndex));
+            clientThread.IsBackground = true;
+            clientThread.Start();
+
+            NetworkStream stream = client.GetStream();
+            string role = (playerIndex == 0) ? "X" : "O";
+            byte[] roleMsg = Encoding.ASCII.GetBytes(Common.FormatMessage("ROLE", $"{role},{availableRoom.RoomId}"));
+            stream.Write(roleMsg, 0, roleMsg.Length);
+
+            if (availableRoom.Players.Count == 2)
+            {
+                availableRoom.GameStatus = Common.GameStatus.Playing;
+                BroadcastToRoom(availableRoom, Common.FormatMessage("START", ""));
+                UpdateStatus($"Room {availableRoom.RoomId}: Game started. Player X's turn.");
+            }
+        }
+
+        private void HandleClient(TcpClient client, Room room, int playerIndex)
         {
             NetworkStream stream = client.GetStream();
             byte[] buffer = new byte[1024];
@@ -201,88 +228,73 @@ namespace CaRoServer
                     string command, data;
                     Common.ParseMessage(message, out command, out data);
 
-                    if (command == "MOVE" && gameStatus == Common.GameStatus.Playing && currentPlayerIndex == playerIndex)
+                    if (command == "MOVE" && room.GameStatus == Common.GameStatus.Playing && room.CurrentPlayerIndex == playerIndex)
                     {
                         string[] coords = data.Split(',');
                         int row = int.Parse(coords[0]);
                         int col = int.Parse(coords[1]);
 
-                        if (row >= 0 && row < Common.BOARD_SIZE &&
-                            col >= 0 && col < Common.BOARD_SIZE &&
-                            board[row, col] == Common.CellState.Empty)
+                        if (row >= 0 && row < Common.BOARD_SIZE && col >= 0 && col < Common.BOARD_SIZE &&
+                            room.Board[row, col] == Common.CellState.Empty)
                         {
-                            // Make the move
-                            board[row, col] = (playerIndex == 0) ? Common.CellState.X : Common.CellState.O;
+                            room.Board[row, col] = (playerIndex == 0) ? Common.CellState.X : Common.CellState.O;
+                            BroadcastToRoom(room, Common.FormatMessage("MOVE", $"{row},{col},{playerIndex}"));
 
-                            // Broadcast the move to all clients
-                            BroadcastMessage(Common.FormatMessage("MOVE", $"{row},{col},{playerIndex}"));
-
-                            // Check for win
-                            if (CheckWin(row, col))
+                            if (CheckWin(room, row, col))
                             {
-                                gameStatus = Common.GameStatus.GameOver;
-                                BroadcastMessage(Common.FormatMessage("GAMEOVER", $"Player {((playerIndex == 0) ? "X" : "O")} wins!"));
-                                UpdateStatus($"Game over. Player {((playerIndex == 0) ? "X" : "O")} wins!");
+                                room.GameStatus = Common.GameStatus.GameOver;
+                                BroadcastToRoom(room, Common.FormatMessage("GAMEOVER", $"Player {((playerIndex == 0) ? "X" : "O")} wins!"));
+                                UpdateStatus($"Room {room.RoomId}: Player {((playerIndex == 0) ? "X" : "O")} wins!");
                             }
-                            else if (IsBoardFull())
+                            else if (IsBoardFull(room))
                             {
-                                gameStatus = Common.GameStatus.GameOver;
-                                BroadcastMessage(Common.FormatMessage("GAMEOVER", "Draw!"));
-                                UpdateStatus("Game over. It's a draw!");
+                                room.GameStatus = Common.GameStatus.GameOver;
+                                BroadcastToRoom(room, Common.FormatMessage("GAMEOVER", "Draw!"));
+                                UpdateStatus($"Room {room.RoomId}: Draw!");
                             }
                             else
                             {
-                                // Switch to the other player
-                                currentPlayerIndex = 1 - currentPlayerIndex;
-                                UpdateStatus($"Player {((currentPlayerIndex == 0) ? "X" : "O")}'s turn");
+                                room.CurrentPlayerIndex = 1 - room.CurrentPlayerIndex;
+                                UpdateStatus($"Room {room.RoomId}: Player {((room.CurrentPlayerIndex == 0) ? "X" : "O")}'s turn");
                             }
                         }
                     }
                     else if (command == "CHAT")
                     {
-                        // Handle chat message
-                        BroadcastMessage(Common.FormatMessage("CHAT", $"Player {playerIndex + 1}: {data}"));
+                        BroadcastToRoom(room, Common.FormatMessage("CHAT", $"Player {playerIndex + 1}: {data}"));
                     }
-                    else if (command == "RESTART" && gameStatus == Common.GameStatus.GameOver)
+                    else if (command == "RESTART" && room.GameStatus == Common.GameStatus.GameOver)
                     {
-                        InitializeBoard();
-                        gameStatus = Common.GameStatus.Playing;
-                        currentPlayerIndex = 0;
-                        BroadcastMessage(Common.FormatMessage("RESTART", ""));
-                        UpdateStatus("Game restarted. Player X's turn.");
+                        room.InitializeBoard();
+                        room.GameStatus = Common.GameStatus.Playing;
+                        room.CurrentPlayerIndex = 0;
+                        BroadcastToRoom(room, Common.FormatMessage("RESTART", ""));
+                        UpdateStatus($"Room {room.RoomId}: Game restarted. Player X's turn.");
                     }
                 }
             }
             catch (Exception)
             {
-                // Client disconnected
-                if (clients.Contains(client))
+                if (room.Players.Contains(client))
                 {
-                    clients.Remove(client);
-                    connectedClients--;
+                    room.Players.Remove(client);
+                    UpdateStatus($"Room {room.RoomId}: Player disconnected. {room.Players.Count}/2 players.");
+                    BroadcastToRoom(room, Common.FormatMessage("DISCONNECT", $"Player {playerIndex + 1} disconnected"));
 
-                    UpdateStatus($"Client disconnected. {connectedClients} clients connected.");
-                    BroadcastMessage(Common.FormatMessage("DISCONNECT", $"Player {playerIndex + 1} disconnected"));
-
-                    if (gameStatus == Common.GameStatus.Playing)
+                    if (room.GameStatus == Common.GameStatus.Playing)
                     {
-                        gameStatus = Common.GameStatus.Waiting;
+                        room.GameStatus = Common.GameStatus.Waiting;
                     }
 
-                    try
-                    {
-                        client.Close();
-                    }
-                    catch { }
+                    try { client.Close(); } catch { }
                 }
             }
         }
 
-        private void BroadcastMessage(string message)
+        private void BroadcastToRoom(Room room, string message)
         {
             byte[] data = Encoding.ASCII.GetBytes(message);
-
-            foreach (var client in clients)
+            foreach (var client in room.Players)
             {
                 try
                 {
@@ -305,52 +317,26 @@ namespace CaRoServer
             }
         }
 
-        private void InitializeBoard()
+        private bool CheckWin(Room room, int row, int col)
         {
-            for (int i = 0; i < Common.BOARD_SIZE; i++)
-            {
-                for (int j = 0; j < Common.BOARD_SIZE; j++)
-                {
-                    board[i, j] = Common.CellState.Empty;
-                }
-            }
-        }
+            Common.CellState player = room.Board[row, col];
+            int count;
 
-        private bool CheckWin(int row, int col)
-        {
-            Common.CellState player = board[row, col];
-
-            // Check horizontally
-            int count = 0;
+            // Horizontal
+            count = 0;
             for (int c = Math.Max(0, col - 4); c <= Math.Min(Common.BOARD_SIZE - 1, col + 4); c++)
             {
-                if (board[row, c] == player)
-                {
-                    count++;
-                    if (count == Common.WINNING_COUNT) return true;
-                }
-                else
-                {
-                    count = 0;
-                }
+                if (room.Board[row, c] == player) { count++; if (count == Common.WINNING_COUNT) return true; } else { count = 0; }
             }
 
-            // Check vertically
+            // Vertical
             count = 0;
             for (int r = Math.Max(0, row - 4); r <= Math.Min(Common.BOARD_SIZE - 1, row + 4); r++)
             {
-                if (board[r, col] == player)
-                {
-                    count++;
-                    if (count == Common.WINNING_COUNT) return true;
-                }
-                else
-                {
-                    count = 0;
-                }
+                if (room.Board[r, col] == player) { count++; if (count == Common.WINNING_COUNT) return true; } else { count = 0; }
             }
 
-            // Check diagonal (top-left to bottom-right)
+            // Diagonal (top-left to bottom-right)
             count = 0;
             for (int i = -4; i <= 4; i++)
             {
@@ -358,19 +344,11 @@ namespace CaRoServer
                 int c = col + i;
                 if (r >= 0 && r < Common.BOARD_SIZE && c >= 0 && c < Common.BOARD_SIZE)
                 {
-                    if (board[r, c] == player)
-                    {
-                        count++;
-                        if (count == Common.WINNING_COUNT) return true;
-                    }
-                    else
-                    {
-                        count = 0;
-                    }
+                    if (room.Board[r, c] == player) { count++; if (count == Common.WINNING_COUNT) return true; } else { count = 0; }
                 }
             }
 
-            // Check diagonal (top-right to bottom-left)
+            // Diagonal (top-right to bottom-left)
             count = 0;
             for (int i = -4; i <= 4; i++)
             {
@@ -378,31 +356,20 @@ namespace CaRoServer
                 int c = col - i;
                 if (r >= 0 && r < Common.BOARD_SIZE && c >= 0 && c < Common.BOARD_SIZE)
                 {
-                    if (board[r, c] == player)
-                    {
-                        count++;
-                        if (count == Common.WINNING_COUNT) return true;
-                    }
-                    else
-                    {
-                        count = 0;
-                    }
+                    if (room.Board[r, c] == player) { count++; if (count == Common.WINNING_COUNT) return true; } else { count = 0; }
                 }
             }
 
             return false;
         }
 
-        private bool IsBoardFull()
+        private bool IsBoardFull(Room room)
         {
             for (int i = 0; i < Common.BOARD_SIZE; i++)
             {
                 for (int j = 0; j < Common.BOARD_SIZE; j++)
                 {
-                    if (board[i, j] == Common.CellState.Empty)
-                    {
-                        return false;
-                    }
+                    if (room.Board[i, j] == Common.CellState.Empty) return false;
                 }
             }
             return true;
@@ -416,7 +383,4 @@ namespace CaRoServer
             Application.Run(new CaroServer());
         }
     }
-
-    // Client Application
-    
 }
