@@ -49,6 +49,8 @@ namespace CaroClient
         private Common.CellState playerRole = Common.CellState.Empty;
         private bool isMyTurn = false;
         private int roomId = -1;
+        private int lastMoveRow = -1; // For highlighting latest move
+        private int lastMoveCol = -1; // For highlighting latest move
 
         public CaroClient()
         {
@@ -133,6 +135,15 @@ namespace CaroClient
             };
             sendButton.Click += (s, e) => SendChatMessage();
 
+            // Surrender button
+            Button surrenderButton = new Button
+            {
+                Text = "Surrender",
+                Location = new Point(Common.BOARD_SIZE * Common.CELL_SIZE + 50, 540),
+                Size = new Size(100, 30)
+            };
+            surrenderButton.Click += Surrender_Click;
+
             this.Controls.Add(serverLabel);
             this.Controls.Add(serverInput);
             this.Controls.Add(connectButton);
@@ -142,6 +153,7 @@ namespace CaroClient
             this.Controls.Add(chatBox);
             this.Controls.Add(chatInput);
             this.Controls.Add(sendButton);
+            this.Controls.Add(surrenderButton);
 
             this.FormClosing += (s, e) => DisconnectFromServer();
         }
@@ -262,6 +274,8 @@ namespace CaroClient
                         int playerIndex = int.Parse(parts[2]);
 
                         board[row, col] = (playerIndex == 0) ? Common.CellState.X : Common.CellState.O;
+                        lastMoveRow = row;
+                        lastMoveCol = col;
                         isMyTurn = (playerIndex == 0 && playerRole == Common.CellState.O) ||
                                   (playerIndex == 1 && playerRole == Common.CellState.X);
 
@@ -273,15 +287,22 @@ namespace CaroClient
                         gameStatus = Common.GameStatus.GameOver;
                         UpdateStatus($"Game over: {data}");
 
-                        if (MessageBox.Show($"Game over: {data}\nDo you want to play again?", "Game Over",
-                                          MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                        DialogResult result = MessageBox.Show($"Game over: {data}\nDo you want to rematch?", "Game Over",
+                                                              MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                        if (result == DialogResult.Yes)
                         {
-                            SendMessage(Common.FormatMessage("RESTART", ""));
+                            SendMessage(Common.FormatMessage("REMATCH", ""));
+                        }
+                        else
+                        {
+                            SendMessage(Common.FormatMessage("NO_REMATCH", ""));
                         }
                     }
                     else if (command == "RESTART")
                     {
                         InitializeBoard();
+                        lastMoveRow = -1;
+                        lastMoveCol = -1;
                         gameStatus = Common.GameStatus.Playing;
                         isMyTurn = (playerRole == Common.CellState.X);
                         UpdateStatus(isMyTurn ? "Game restarted. Your turn!" : "Game restarted. Opponent's turn...");
@@ -295,6 +316,11 @@ namespace CaroClient
                     {
                         gameStatus = Common.GameStatus.Waiting;
                         UpdateStatus($"{data}. Waiting for reconnection...");
+                    }
+                    else if (command == "END_GAME")
+                    {
+                        MessageBox.Show(data, "Game Ended", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        DisconnectFromServer();
                     }
                 }
             }
@@ -337,12 +363,14 @@ namespace CaroClient
 
                     if (board[row, col] == Common.CellState.X)
                     {
-                        g.DrawLine(new Pen(Color.Blue, 2), x + 5, y + 5, x + Common.CELL_SIZE - 5, y + Common.CELL_SIZE - 5);
-                        g.DrawLine(new Pen(Color.Blue, 2), x + Common.CELL_SIZE - 5, y + 5, x + 5, y + Common.CELL_SIZE - 5);
+                        Pen pen = (row == lastMoveRow && col == lastMoveCol) ? new Pen(Color.Green, 2) : new Pen(Color.Blue, 2);
+                        g.DrawLine(pen, x + 5, y + 5, x + Common.CELL_SIZE - 5, y + Common.CELL_SIZE - 5);
+                        g.DrawLine(pen, x + Common.CELL_SIZE - 5, y + 5, x + 5, y + Common.CELL_SIZE - 5);
                     }
                     else if (board[row, col] == Common.CellState.O)
                     {
-                        g.DrawEllipse(new Pen(Color.Red, 2), x + 5, y + 5, Common.CELL_SIZE - 10, Common.CELL_SIZE - 10);
+                        Pen pen = (row == lastMoveRow && col == lastMoveCol) ? new Pen(Color.Green, 2) : new Pen(Color.Red, 2);
+                        g.DrawEllipse(pen, x + 5, y + 5, Common.CELL_SIZE - 10, Common.CELL_SIZE - 10);
                     }
                 }
             }
@@ -360,6 +388,14 @@ namespace CaroClient
                 {
                     SendMessage(Common.FormatMessage("MOVE", $"{row},{col}"));
                 }
+            }
+        }
+
+        private void Surrender_Click(object sender, EventArgs e)
+        {
+            if (gameStatus == Common.GameStatus.Playing)
+            {
+                SendMessage(Common.FormatMessage("SURRENDER", ""));
             }
         }
 

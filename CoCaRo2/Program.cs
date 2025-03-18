@@ -31,7 +31,6 @@ namespace CaRoServer
         }
     }
 
-    // Room class to manage a game between 2 players
     public class Room
     {
         public List<TcpClient> Players { get; set; } = new List<TcpClient>();
@@ -39,6 +38,7 @@ namespace CaRoServer
         public Common.GameStatus GameStatus { get; set; } = Common.GameStatus.Waiting;
         public int CurrentPlayerIndex { get; set; } = 0;
         public int RoomId { get; set; }
+        public bool[] RematchRequests { get; set; } = new bool[2];
 
         public Room(int id)
         {
@@ -175,7 +175,6 @@ namespace CaRoServer
         {
             Room availableRoom = null;
 
-            // Find an available room or create a new one
             foreach (var room in rooms)
             {
                 if (room.Players.Count < 2 && room.GameStatus == Common.GameStatus.Waiting)
@@ -263,13 +262,26 @@ namespace CaRoServer
                     {
                         BroadcastToRoom(room, Common.FormatMessage("CHAT", $"Player {playerIndex + 1}: {data}"));
                     }
-                    else if (command == "RESTART" && room.GameStatus == Common.GameStatus.GameOver)
+                    else if (command == "SURRENDER")
                     {
-                        room.InitializeBoard();
-                        room.GameStatus = Common.GameStatus.Playing;
-                        room.CurrentPlayerIndex = 0;
-                        BroadcastToRoom(room, Common.FormatMessage("RESTART", ""));
-                        UpdateStatus($"Room {room.RoomId}: Game restarted. Player X's turn.");
+                        room.GameStatus = Common.GameStatus.GameOver;
+                        string surrenderMsg = $"Player {((playerIndex == 0) ? "X" : "O")} surrendered";
+                        BroadcastToRoom(room, Common.FormatMessage("GAMEOVER", surrenderMsg));
+                        UpdateStatus($"Room {room.RoomId}: {surrenderMsg}");
+                    }
+                    else if (command == "REMATCH" && room.GameStatus == Common.GameStatus.GameOver)
+                    {
+                        room.RematchRequests[playerIndex] = true;
+                        if (room.RematchRequests[0] && room.RematchRequests[1])
+                        {
+                            room.InitializeBoard();
+                            room.GameStatus = Common.GameStatus.Playing;
+                            room.CurrentPlayerIndex = 0;
+                            room.RematchRequests[0] = false;
+                            room.RematchRequests[1] = false;
+                            BroadcastToRoom(room, Common.FormatMessage("RESTART", ""));
+                            UpdateStatus($"Room {room.RoomId}: Game restarted. Player X's turn.");
+                        }
                     }
                 }
             }
